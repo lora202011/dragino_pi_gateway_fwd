@@ -672,7 +672,7 @@ int lgw_gps_get(struct timespec *utc, struct timespec *gps_time, struct coord_s 
             gps_time->tv_nsec = (long)(fractpart * 1E9);
         } else {
             lgw_gps_get(gps_time, NULL, NULL, NULL);
-            gps_time->tv_sec -= 315964800;
+            gps_time->tv_sec -= 315964782;
         }
     }
     if (loc != NULL) {
