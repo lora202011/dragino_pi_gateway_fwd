@@ -27,6 +27,7 @@ Maintainer: Michael Coracin
 #include <time.h>       /* time library */
 #include <termios.h>    /* speed_t */
 #include <unistd.h>     /* ssize_t */
+#include <pthread.h>    /* pthread_t */
 
 #include "config.h"     /* library configuration options (dynamically generated) */
 
@@ -53,6 +54,16 @@ struct coord_s {
     double  lat;    /*!> latitude [-90,90] (North +, South -) */
     double  lon;    /*!> longitude [-180,180] (East +, West -)*/
     short   alt;    /*!> altitude in meters (WGS 84 geoid ref.) */
+};
+
+/**
+ * @struct pps_handle
+ * @brief handle for the pps pin
+ */
+struct pps_handle {
+    int chip_fd; /*!> file descriptor of the gpiochip */
+    int line_fd; /*!> file descriptor of the pps line */
+    pthread_t pps_thread; /*!> The ISR thread */
 };
 
 /**
@@ -106,6 +117,16 @@ enum gps_msg {
 @return success if the function was able to connect and configure a GPS module
 */
 int lgw_gps_enable(char* tty_path, char* gps_family_str, speed_t target_brate, int* fd_ptr);
+
+/**
+ * @brief Enables observing the PPS pin to get the offset between system time and GPS time
+ * 
+ * @param gpiochip_path the path to the /dev/gpiochip device, to which the PPS output is connected
+ * @param line the line on the chip to observe.
+ * @param pps_handle handle for the chip and line
+ * @return 0 on success.
+ */
+int lgw_gps_enable_pps(char *gpiochip_path, uint32_t line, struct pps_handle* pps_handle);
 
 /**
 @brief Restore GPS serial configuration and close serial device

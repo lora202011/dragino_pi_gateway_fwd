@@ -29,8 +29,14 @@ Maintainer: Michael Coracin
 #include <fcntl.h>      /* open */
 #include <termios.h>    /* tcflush */
 #include <math.h>       /* modf */
+#include <pthread.h>    /* pthread */
+#include <poll.h>       /* polling isr */
+#include <errno.h>
 
 #include <stdlib.h>
+
+#include <sys/ioctl.h>
+#include <linux/gpio.h>
 
 #include "loragw_gps.h"
 
@@ -88,6 +94,8 @@ static bool gps_pos_ok = false;
 static char gps_mod = 'N'; /* GPS mode (N no fix, A autonomous, D differential) */
 static short gps_sat = 0; /* number of satellites used for fix */
 
+static uint64_t gps_last_pps = 0;
+
 static enum {
     /* Timing synchronization via RMC */
     GPS_FAMILY_DEFAULT,
@@ -109,6 +117,8 @@ static bool validate_nmea_checksum(const char *serial_buff, int buff_size);
 static bool match_label(const char *s, char *label, int size, char wildcard);
 
 static int str_chop(char *s, int buff_size, char separator, int *idx_ary, int max_idx);
+
+static void *pps_thread(void *arg);
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS DEFINITION ----------------------------------------- */
@@ -255,6 +265,36 @@ int str_chop(char *s, int buff_size, char separator, int *idx_ary, int max_idx) 
     return j;
 }
 
+static void *pps_thread(void *arg) {
+    struct pps_handle *pps_handle = (struct pps_handle*)arg;
+    struct pollfd irq_pollfd = {
+        .fd = pps_handle->line_fd,
+        .events = POLLIN | POLLPRI,
+    };
+    DEBUG_MSG("PPS thread has started.");
+
+    bool irq_enabled = true;
+    while (irq_enabled) {
+        int pollres = poll(&irq_pollfd, 1, -1);
+        if (pollres < 0) {
+            DEBUG_MSG("Polling PPS GPIO failed: %s\n", strerror(errno));
+        } else if (irq_pollfd.revents) {
+            struct gpioevent_data ev_data;
+            read(pps_handle->line_fd, &ev_data, sizeof(ev_data));
+            gps_last_pps = ev_data.timestamp;
+            DEBUG_MSG("PPS received at %llu\n", ev_data.timestamp);
+        }
+    }
+
+    close(pps_handle->line_fd);
+    pps_handle->line_fd = -1;
+    close(pps_handle->chip_fd);
+    pps_handle->chip_fd = -1;
+    pps_handle->pps_thread = 0;
+
+    return NULL;
+}
+
 /* -------------------------------------------------------------------------- */
 /* --- PUBLIC FUNCTIONS DEFINITION ------------------------------------------ */
 
@@ -272,6 +312,9 @@ int lgw_gps_enable(char *tty_path, char *gps_family_str, speed_t target_brate, i
      * See 3.19 in https://www.quectel.com/UploadImage/Downlad/Quectel_L70_GPS_Protocol_Specification_V2.0.pdf
      * However, note that the example given there misses a ",0" in between */
     char rmc_cmd[] = "$PMTK314,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,0*29\r\n";
+    /* This assures that NMEA sentences are sent strictly after the PPS pulse.
+     * Not documented for the L70 (only L80), but seems to be acknowledged */
+    char pps_cmd[] = "$PMTK255,1*2D\r\n";
     ssize_t num_written;
 
     /* check input parameters */
@@ -375,7 +418,11 @@ int lgw_gps_enable(char *tty_path, char *gps_family_str, speed_t target_brate, i
     else if (gps_family == GPS_FAMILY_DEFAULT) {
         num_written = write (gps_tty_dev, rmc_cmd, strlen(rmc_cmd));
         if (num_written != (ssize_t)strlen(rmc_cmd)) {
-            DEBUG_MSG("ERROR: Failed to write on serial port (written=%d)\n", (int) num_written);
+            DEBUG_MSG("ERROR: Failed to write RMC request on serial port (written=%d)\n", (int) num_written);
+        }
+        num_written = write (gps_tty_dev, pps_cmd, strlen(pps_cmd));
+        if (num_written != (ssize_t)strlen(pps_cmd)) {
+            DEBUG_MSG("ERROR: Failed to write PPS request on serial port (written=%d)\n", (int) num_written);
         }
     }
 
@@ -388,6 +435,57 @@ int lgw_gps_enable(char *tty_path, char *gps_family_str, speed_t target_brate, i
     gps_mod = 'N';
 
     return LGW_GPS_SUCCESS;
+}
+
+int lgw_gps_enable_pps(char *gpiochip_path, uint32_t line, struct pps_handle *pps_handle) {
+
+    /* Open the chip */
+    struct gpiochip_info info;
+    int chip_fd = open(gpiochip_path, O_RDWR);
+    if (chip_fd < 0) {
+        DEBUG_MSG("ERROR: Cannot open gpiochip at %s:\n",
+            gpiochip_path, strerror(errno));
+        return chip_fd;
+    }
+    if (ioctl(chip_fd, GPIO_GET_CHIPINFO_IOCTL, &info) < 0) {
+        DEBUG_MSG("ERROR: Cannot retrieve info for %s: %s\n",
+            gpiochip_path, strerror(errno));
+        close(chip_fd);
+        return -1;
+    }
+    if (line >= info.lines) {
+        close(chip_fd);
+        DEBUG_MSG("ERROR: %s does not support line %d\n", gpiochip_path, line);
+        return -1;
+    }
+
+    /* Open the line */
+    struct gpioevent_request req = {
+        .lineoffset     = line,
+        .handleflags    = GPIOHANDLE_REQUEST_INPUT,
+        .eventflags     = GPIOEVENT_EVENT_RISING_EDGE
+    };
+    int res = ioctl(chip_fd, GPIO_GET_LINEEVENT_IOCTL, &req);
+    if (res < 0) {
+        DEBUG_MSG("ERROR: Could not get line handle %d on chip %s: %s\n",
+            line, gpiochip_path, strerror(errno));
+        close(chip_fd);
+        return res;
+    }
+
+    pps_handle->chip_fd = chip_fd;
+    pps_handle->line_fd = req.fd;
+    res = pthread_create(&(pps_handle->pps_thread), NULL, pps_thread, pps_handle);
+    if (res != 0) {
+        close(pps_handle->line_fd);
+        pps_handle->line_fd = -1;
+        close(pps_handle->chip_fd);
+        pps_handle->chip_fd = -1;
+        DEBUG_MSG("ERROR: Could not start PPS thread, reason=%d\n", res);
+        return res;
+    }
+
+    return 0;
 }
 
 /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */

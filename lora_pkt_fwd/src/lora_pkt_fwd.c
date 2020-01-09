@@ -161,6 +161,14 @@ static double xtal_correct = 1.0;
 static char gps_tty_path[64] = "\0"; /* path of the TTY port GPS is connected on */
 static int gps_tty_fd = -1; /* file descriptor of the GPS TTY port */
 static bool gps_enabled = false; /* is GPS enabled on that gateway ? */
+static char gps_pps_path[64] = "\0";
+static int gps_pps_line = -1;
+static struct pps_handle gps_pps_handle = {
+    .chip_fd = -1,
+    .line_fd = -1,
+    .pps_thread = 0,
+};
+static bool gps_pps_enabled = false;
 
 /* GPS time reference */
 static pthread_mutex_t mx_timeref = PTHREAD_MUTEX_INITIALIZER; /* control access to GPS time reference */
@@ -790,6 +798,14 @@ static int parse_gateway_configuration(const char * conf_file) {
         MSG_DEBUG(DEBUG_INFO, "INFO~ GPS serial port path is configured to \"%s\"\n", gps_tty_path);
     }
 
+    str = json_object_get_string(conf_obj, "gps_pps_path");
+    val = json_object_get_value(conf_obj, "gps_pps_line");
+    if (str != NULL && val != NULL) {
+        strncpy(gps_pps_path, str, sizeof gps_pps_path);
+        gps_pps_line = (uint32_t)json_value_get_number(val);
+        MSG_DEBUG(DEBUG_INFO, "INFO~ GPS PPS configured to line %d of \"%s\"\n", gps_pps_line, gps_pps_path);
+    }
+
     /* get reference coordinates */
     val = json_object_get_value(conf_obj, "ref_latitude");
     if (val != NULL) {
@@ -1202,6 +1218,16 @@ int main(void)
         }
     }
 
+    if (gps_pps_path[0] != '\0' && gps_pps_line != -1) {
+        i = lgw_gps_enable_pps(gps_pps_path, gps_pps_line, &gps_pps_handle);
+        if (i != LGW_GPS_SUCCESS) {
+            MSG_DEBUG(DEBUG_WARNING, "WARNING: [main] impossible to open %s for GPS PPS sync (check permissions)\n", gps_pps_path);
+        } else {
+            MSG_DEBUG(DEBUG_INFO, "INFO~ [main] GPIO%d of %s open for GPS PPS sync\n", gps_pps_line, gps_pps_path);
+            gps_pps_enabled = true;
+        }
+    }
+
     /* get timezone info */
     tzset();
 
@@ -1476,6 +1502,9 @@ int main(void)
         } else {
             MSG_DEBUG(DEBUG_WARNING, "WARNING: failed to close GPS successfully\n");
         }
+    }
+    if (gps_pps_enabled == true) {
+        pthread_cancel(gps_pps_handle.pps_thread);
     }
 
     /* if an exit signal was received, try to quit properly */
@@ -2859,6 +2888,7 @@ static void gps_process_sync(void) {
     pthread_mutex_lock(&mx_concent);
     i = lgw_get_trigcnt(&trig_tstamp);
     pthread_mutex_unlock(&mx_concent);
+    printf("TS on PPS = %lu\n", trig_tstamp);
     if (i != LGW_HAL_SUCCESS) {
         MSG_DEBUG(DEBUG_WARNING, "WARNING: [gps] failed to read concentrator timestamp\n");
         return;
