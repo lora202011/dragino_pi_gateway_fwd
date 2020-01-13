@@ -84,7 +84,8 @@ int get_concentrator_time(struct timeval *concent_time, struct timeval unix_time
 /* ---------------------------------------------------------------------------------------------- */
 /* --- THREAD 6: REGULARLAY MONITOR THE OFFSET BETWEEN UNIX CLOCK AND CONCENTRATOR CLOCK -------- */
 
-void thread_timersync(void) {
+void thread_timersync(void *arg_noconcentpps) {
+    bool noconcentpps = *((bool*)arg_noconcentpps);
     struct timeval unix_timeval;
     struct timeval concentrator_timeval;
     uint32_t sx1301_timecount = 0;
@@ -95,9 +96,11 @@ void thread_timersync(void) {
         /* Regularly disable GPS mode of concentrator's counter, in order to get
             real timer value for synchronizing with host's unix timer */
         //MSG("\nINFO~ Disabling GPS mode for concentrator's counter...\n");
-        pthread_mutex_lock(&mx_concent);
-        lgw_reg_w(LGW_GPS_EN, 0);
-        pthread_mutex_unlock(&mx_concent);
+        if (!noconcentpps) {
+            pthread_mutex_lock(&mx_concent);
+            lgw_reg_w(LGW_GPS_EN, 0);
+            pthread_mutex_unlock(&mx_concent);
+        }
 
         /* Get current unix time */
         gettimeofday(&unix_timeval, NULL);
@@ -131,9 +134,11 @@ void thread_timersync(void) {
             offset_unix_concent.tv_usec,
             offset_drift.tv_sec * 1000000UL + offset_drift.tv_usec);
         MSG("INFO~ Enabling GPS mode for concentrator's counter.\n\n");*/
-        pthread_mutex_lock(&mx_concent); /* TODO: Is it necessary to protect here? */
-        lgw_reg_w(LGW_GPS_EN, 1);
-        pthread_mutex_unlock(&mx_concent);
+        if (!noconcentpps) {
+            pthread_mutex_lock(&mx_concent); /* TODO: Is it necessary to protect here? */
+            lgw_reg_w(LGW_GPS_EN, 1);
+            pthread_mutex_unlock(&mx_concent);
+        }
 
         /* delay next sync */
         /* If we consider a crystal oscillator precision of about 20ppm worst case, and a clock

@@ -38,6 +38,8 @@ Maintainer: Michael Coracin
 #include <sys/ioctl.h>
 #include <linux/gpio.h>
 
+#include "loragw_hal.h"
+
 #include "loragw_gps.h"
 
 /* -------------------------------------------------------------------------- */
@@ -64,6 +66,8 @@ Maintainer: Michael Coracin
 #define DEFAULT_BAUDRATE    B9600
 
 #define UBX_MSG_NAVTIMEGPS_LEN  16
+
+#define PPS_SYNC_DATA_SIZE 8
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE VARIABLES ---------------------------------------------------- */
@@ -94,7 +98,11 @@ static bool gps_pos_ok = false;
 static char gps_mod = 'N'; /* GPS mode (N no fix, A autonomous, D differential) */
 static short gps_sat = 0; /* number of satellites used for fix */
 
-static uint64_t gps_last_pps = 0;
+/* Data for regression of local pps pulses and concentrator time */
+static uint64_t gps_pps_sync_local = 0;
+static uint32_t gps_pps_sync_trigcnt = 0;
+static bool gps_pps_sync_data_valid = false; /* Regression data is valid */
+static pthread_mutex_t gps_pps_sync_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static enum {
     /* Timing synchronization via RMC */
@@ -119,6 +127,8 @@ static bool match_label(const char *s, char *label, int size, char wildcard);
 static int str_chop(char *s, int buff_size, char separator, int *idx_ary, int max_idx);
 
 static void *pps_thread(void *arg);
+
+//X static void pps_run_regression(void);
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS DEFINITION ----------------------------------------- */
@@ -279,10 +289,19 @@ static void *pps_thread(void *arg) {
         if (pollres < 0) {
             DEBUG_MSG("Polling PPS GPIO failed: %s\n", strerror(errno));
         } else if (irq_pollfd.revents) {
+            uint32_t trigcount = 0;
+            int trig_res = lgw_get_trigcnt(&trigcount);
             struct gpioevent_data ev_data;
-            read(pps_handle->line_fd, &ev_data, sizeof(ev_data));
-            gps_last_pps = ev_data.timestamp;
-            DEBUG_MSG("PPS received at %llu\n", ev_data.timestamp);
+            ssize_t read_res = read(pps_handle->line_fd, &ev_data, sizeof(ev_data));
+            if (trig_res == 0 && read_res > 0) {
+                pthread_mutex_lock(&gps_pps_sync_mtx);
+                gps_pps_sync_data_valid = true;
+                gps_pps_sync_local = ev_data.timestamp;
+                gps_pps_sync_trigcnt = trigcount;
+                pthread_mutex_unlock(&gps_pps_sync_mtx);
+            } else {
+                DEBUG_MSG("Error getting PPS time\n");
+            }
         }
     }
 
@@ -437,7 +456,8 @@ int lgw_gps_enable(char *tty_path, char *gps_family_str, speed_t target_brate, i
     return LGW_GPS_SUCCESS;
 }
 
-int lgw_gps_enable_pps(char *gpiochip_path, uint32_t line, struct pps_handle *pps_handle) {
+int lgw_gps_enable_pps(char *gpiochip_path, uint32_t line, 
+    pthread_mutex_t *mtx_concent, struct pps_handle *pps_handle) {
 
     /* Open the chip */
     struct gpiochip_info info;
@@ -475,6 +495,7 @@ int lgw_gps_enable_pps(char *gpiochip_path, uint32_t line, struct pps_handle *pp
 
     pps_handle->chip_fd = chip_fd;
     pps_handle->line_fd = req.fd;
+    pps_handle->mtx_concent = mtx_concent;
     res = pthread_create(&(pps_handle->pps_thread), NULL, pps_thread, pps_handle);
     if (res != 0) {
         close(pps_handle->line_fd);
@@ -814,7 +835,7 @@ int lgw_gps_sync(struct tref *ref, uint32_t count_us, struct timespec utc, struc
     if (utc_diff != 0) { // prevent divide by zero
         slope = cnt_diff/utc_diff;
         if ((slope > PLUS_10PPM) || (slope < MINUS_10PPM)) {
-            DEBUG_MSG("Warning: correction range exceeded\n");
+            DEBUG_MSG("Warning: correction range exceeded: %f\n", slope);
             aber_n0 = true;
         } else {
             aber_n0 = false;
@@ -862,6 +883,20 @@ int lgw_gps_sync(struct tref *ref, uint32_t count_us, struct timespec utc, struc
 
     return LGW_GPS_SUCCESS;
 }
+
+/* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+
+int lgw_get_trigcnt_ppsfallback(uint32_t *trig_cnt_us) {
+    pthread_mutex_lock(&gps_pps_sync_mtx);
+    if (!gps_pps_sync_data_valid) {
+        pthread_mutex_unlock(&gps_pps_sync_mtx);
+        return -1;
+    }
+    (*trig_cnt_us) = gps_pps_sync_trigcnt;
+    pthread_mutex_unlock(&gps_pps_sync_mtx);
+    return 0;
+}
+
 
 /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
 

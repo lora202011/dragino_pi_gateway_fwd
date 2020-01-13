@@ -161,6 +161,7 @@ static double xtal_correct = 1.0;
 static char gps_tty_path[64] = "\0"; /* path of the TTY port GPS is connected on */
 static int gps_tty_fd = -1; /* file descriptor of the GPS TTY port */
 static bool gps_enabled = false; /* is GPS enabled on that gateway ? */
+static bool gps_mode_noconcentpps = false; /* don't bind concentrator times to PPS pulses */
 static char gps_pps_path[64] = "\0";
 static int gps_pps_line = -1;
 static struct pps_handle gps_pps_handle = {
@@ -274,7 +275,7 @@ void thread_down(void);
 void thread_gps(void);
 void thread_valid(void);
 void thread_jit(void);
-void thread_timersync(void);
+void thread_timersync(void *arg_noconcentpps);
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS DEFINITION ----------------------------------------- */
@@ -1206,6 +1207,7 @@ int main(void)
 
     /* Start GPS a.s.a.p., to allow it to lock */
     if (gps_tty_path[0] != '\0') { /* do not try to open GPS device if no path set */
+        char *gps_family = NULL;
         i = lgw_gps_enable(gps_tty_path, NULL, 0, &gps_tty_fd); /* HAL only supports u-blox 7 for now */
         if (i != LGW_GPS_SUCCESS) {
             MSG_DEBUG(DEBUG_WARNING, "WARNING: [main] impossible to open %s for GPS sync (check permissions)\n", gps_tty_path);
@@ -1215,11 +1217,19 @@ int main(void)
             MSG_DEBUG(DEBUG_INFO, "INFO~ [main] TTY port %s open for GPS synchronization\n", gps_tty_path);
             gps_enabled = true;
             gps_ref_valid = false;
+
+            /* For the default GPS-family, disable PPS-based concentrator time.
+             * By setting LGW_GPS_EN to 0, requests to LGW_TIMESTAMP return the current timestamp instead
+             * of the one at the last PPM pulse.
+             */
+            if (gps_family == NULL) {
+                gps_mode_noconcentpps = true;
+            }
         }
     }
 
     if (gps_pps_path[0] != '\0' && gps_pps_line != -1) {
-        i = lgw_gps_enable_pps(gps_pps_path, gps_pps_line, &gps_pps_handle);
+        i = lgw_gps_enable_pps(gps_pps_path, gps_pps_line, &mx_concent, &gps_pps_handle);
         if (i != LGW_GPS_SUCCESS) {
             MSG_DEBUG(DEBUG_WARNING, "WARNING: [main] impossible to open %s for GPS PPS sync (check permissions)\n", gps_pps_path);
         } else {
@@ -1281,6 +1291,12 @@ int main(void)
         exit(EXIT_FAILURE);
     }
 
+    if (gps_mode_noconcentpps) {
+        pthread_mutex_lock(&mx_concent);
+        lgw_reg_w(LGW_GPS_EN, 0);
+        pthread_mutex_unlock(&mx_concent);
+    }
+
     /* spawn threads to manage upstream and downstream */
     i = pthread_create( &thrid_up, NULL, (void * (*)(void *))thread_up, NULL);
     if (i != 0) {
@@ -1297,7 +1313,7 @@ int main(void)
         MSG_DEBUG(DEBUG_ERROR, "ERROR~ [main] impossible to create JIT thread\n");
         exit(EXIT_FAILURE);
     }
-    i = pthread_create( &thrid_timersync, NULL, (void * (*)(void *))thread_timersync, NULL);
+    i = pthread_create( &thrid_timersync, NULL, (void * (*)(void *))thread_timersync, &gps_mode_noconcentpps);
     if (i != 0) {
         MSG_DEBUG(DEBUG_ERROR, "ERROR~ [main] impossible to create Timer Sync thread\n");
         exit(EXIT_FAILURE);
@@ -2121,7 +2137,7 @@ void thread_down(void) {
     last_beacon_gps_time.tv_nsec = 0;
 
     /* beacon packet parameters */
-    beacon_pkt.tx_mode = ON_GPS; /* send on PPS pulse */
+    beacon_pkt.tx_mode = gps_mode_noconcentpps ? TIMESTAMPED : ON_GPS; /* send on PPS pulse */
     beacon_pkt.rf_chain = 0; /* antenna A */
     beacon_pkt.rf_power = beacon_power;
     beacon_pkt.modulation = MOD_LORA;
@@ -2885,13 +2901,18 @@ static void gps_process_sync(void) {
     }
 
     /* get timestamp captured on PPM pulse  */
-    pthread_mutex_lock(&mx_concent);
-    i = lgw_get_trigcnt(&trig_tstamp);
-    pthread_mutex_unlock(&mx_concent);
-    printf("TS on PPS = %lu\n", trig_tstamp);
-    if (i != LGW_HAL_SUCCESS) {
-        MSG_DEBUG(DEBUG_WARNING, "WARNING: [gps] failed to read concentrator timestamp\n");
-        return;
+    if (!gps_mode_noconcentpps) {
+        /* If the concentrator has access to PPS pulses ... */
+        pthread_mutex_lock(&mx_concent);
+        i = lgw_get_trigcnt(&trig_tstamp);
+        pthread_mutex_unlock(&mx_concent);
+        if (i != LGW_HAL_SUCCESS) {
+            MSG_DEBUG(DEBUG_WARNING, "WARNING: [gps] failed to read concentrator timestamp\n");
+            return;
+        }
+    } else {
+        /* If the concentrator has no access to PPS pulses */
+        lgw_get_trigcnt_ppsfallback(&trig_tstamp);
     }
 
     /* try to update time reference with the new GPS time & timestamp */
