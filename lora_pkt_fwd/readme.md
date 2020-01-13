@@ -32,11 +32,11 @@ please read the PROTOCOL.TXT document.
 	|| Concentrator |<----+ Host |<------xx     or    xx-------->|        |
 	||              | SPI |      ||      xx  Intranet  xx        | Server |
 	|+--------------+     +------+|       xxxx   x   xxxx        |        |
-	|   ^                    ^    |           xxxxxxxx           |        |
-	|   | PPS  +-----+  NMEA |    |                              |        |
-	|   +------| GPS |-------+    |                              +--------+
-	|          +-----+            |
-	|                             |
+	|                        ^ ^  |           xxxxxxxx           |        |
+	|          +-----+  NMEA | |  |                              |        |
+	|          | GPS |-------+ |  |                              +--------+
+	|          +-----+----------  |
+	|                   PPS       |
 	|            Gateway          |
 	+- - - - - - - - - - - - - - -+
 
@@ -54,6 +54,9 @@ Server: an abstract computer that will process the RF packets received and
 forwarded by the gateway, and issue RF packets in response that the gateway 
 will have to emit.
 
+> **Note:** To allow the forwarder to access the SPI Bus and GPIO Chip of the
+Raspberry Pi, make sure to run `raspi_config`, disable the Bluetooth
+connection, enable usage of the serial port and allow access to the GPIO pins.
 
 3. Dependencies
 ----------------
@@ -196,15 +199,13 @@ configured in 2 different ways:
     - PPS mode: when GPS is enabled, the value read in sample register is the
       value that the concentrator counter had when last GPS’s PPS occurred. So
       this changes every second only.
-As in our case GPS is enabled (LGW_GPS_EN==1), we need to have a way to get the
-actual concentrator current time, at any time.
-For this, a new thread has been added to the packet forwarder (thread_timersync)
-which will regularly:
-    - Disable GPS mode of SX1301 counter sampler
+With this version of the forwarder, the concentrator timestamp is constantly
+bound to the real time mode, as the SX1301 has no PPS connection.
+The thread_timersync thread has been added to the packet forwarder which will
+regularly:
     - Get current Unix time
     - Get current SX1301 counter
     - Compute the offset between Unix and SX1301 clocks and store it
-    - Re-enable GPS mode of SX1301 counter sampler
 Then a new function has been added to estimate the current concentrator counter
 at any time based on the current Unix time and offset computed by the timersync
 thread.
@@ -225,13 +226,8 @@ counter:
       Note: even if a Class-B downlink is given with a GPS timestamp, the
       concentrator TX mode is configured as “TIMESTAMP”, and not “ON_GPS”. So
       at the end, it is the counter value which will be used for transmission.
-    - Beacons: beacons transmission time is based on GPS clock, and the
-      concentrator TX mode is configured as “ON_GPS” for accurate beacon
-      transmission on GPS PPS event. In this case, the concentrator does not
-      need the packet counter to be set. But, as the JiT thread decides if a
-      packet has to be peeked or not, based on its concentrator counter, we need
-      to have the beacon packet counter set (see next chapter for more details
-      on JiT scheduling).
+    - Beacons: With this modified version of the concentrator, beacons are
+      sent with the "TIMESTAMP" mode as well.
 We also need to convert a SX1301 counter value to GPS UTC time when we receive
 an uplink, in order to fill the “time” field of JSON “rxpk” structure.
 

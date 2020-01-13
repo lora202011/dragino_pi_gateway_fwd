@@ -8,11 +8,17 @@
 Lora network packet forwarder project
 ======================================
 
-Changes in this repository compared to [Dragino's repository](https://github.com/dragino/pi_gateway_fwd):
-- Modify default device name for GPS (`/dev/ttyS0` instead of `/dev/ttyACM0` already used by bluetooth)
-- Add .gitignore for generated files
-- Fix output of tmms value
-- Add support for using the Quectel L70 as timing source. RMC sentences are enabled instead of ubx7, which are not supported by the GPS module.
+This version of the pi_gateway_fwd is a special version for Dragino's PG1301
+[10 channels - LoRaWAN GPS Concentrator for Raspberry Pi](http://www.dragino.com/products/lora/item/149-lora-gps-hat.html).
+
+It contains two major adjustments:
+- As the GPS module does not provide the proprietary ubx commands used by the standard fowarder, this version
+configures the Quectel L70 to provide alternative records and parses them.
+- It uses the 1PPS line on GPIO18 of the Raspberry Pi to synchronize the concentrator timestamps to the
+global GPS clock.
+
+With both modifications, the concentrator is able to provide Class B support. With the default forwarder software, it does
+not provide support for GPS-based scheduling.
 
 1. Core program: lora_pkt_fwd
 -------------------------------
@@ -32,11 +38,11 @@ the network.
 	|| Concentrator |<----+ Host |<------xx     or    xx-------->|        |
 	||              | SPI |      ||      xx  Intranet  xx        | Server |
 	|+--------------+     +------+|       xxxx   x   xxxx        |        |
-	|   ^                    ^    |           xxxxxxxx           |        |
-	|   | PPS  +-----+  NMEA |    |                              |        |
-	|   +------| GPS |-------+    |                              +--------+
-	|          +-----+            |
-	|                             |
+	|                        ^ ^  |           xxxxxxxx           |        |
+	|          +-----+  NMEA | |  |                              |        |
+	|          | GPS |-------+ |  |                              +--------+
+	|          +-----+----------  |
+	|                   PPS       |
 	|            Gateway          |
 	+- - - - - - - - - - - - - - -+
 
