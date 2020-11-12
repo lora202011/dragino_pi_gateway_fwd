@@ -741,7 +741,7 @@ static int parse_gateway_configuration(const char * conf_file) {
     }
 
     /* packet filtering parameters */
-    val = json_object_get_value(conf_obj, "forward_crc_valid");
+    /*val = json_object_get_value(conf_obj, "forward_crc_valid");
     if (json_value_get_type(val) == JSONBoolean) {
         fwd_valid_pkt = (bool)json_value_get_boolean(val);
     }
@@ -1612,8 +1612,8 @@ void thread_up(void) {
             mote_fcnt  = p->payload[6];
             mote_fcnt |= p->payload[7] << 8;
 
-            /* basic packet filtering */
-            pthread_mutex_lock(&mx_meas_up);
+           /* basic packet filtering */
+           /* pthread_mutex_lock(&mx_meas_up);
             meas_nb_rx_rcv += 1;
             switch(p->status) {
                 case STAT_CRC_OK:
@@ -1622,28 +1622,28 @@ void thread_up(void) {
                     if (!fwd_valid_pkt) {
                         pthread_mutex_unlock(&mx_meas_up);
                         continue; /* skip that packet */
-                    }
+              /*      }
                     break;
                 case STAT_CRC_BAD:
                     meas_nb_rx_bad += 1;
                     if (!fwd_error_pkt) {
                         pthread_mutex_unlock(&mx_meas_up);
                         continue; /* skip that packet */
-                    }
+           /*         }
                     break;
                 case STAT_NO_CRC:
                     meas_nb_rx_nocrc += 1;
                     if (!fwd_nocrc_pkt) {
                         pthread_mutex_unlock(&mx_meas_up);
                         continue; /* skip that packet */
-                    }
+              /*      }
                     break;
                 default:
                     MSG_DEBUG(DEBUG_WARNING, "WARNING: [up] received packet with unknown status %u (size %u, modulation %u, BW %u, DR %u, RSSI %.1f)\n", p->status, p->size, p->modulation, p->bandwidth, p->datarate, p->rssi);
                     pthread_mutex_unlock(&mx_meas_up);
                     continue; /* skip that packet */
                     // exit(EXIT_FAILURE);
-            }
+         /*   }
             meas_up_pkt_fwd += 1;
             meas_up_payload_byte += p->size;
             pthread_mutex_unlock(&mx_meas_up);
@@ -1656,7 +1656,7 @@ void thread_up(void) {
                 buff_up[buff_index] = ',';
                 buff_up[buff_index+1] = '{';
                 buff_index += 2;
-            }
+            } */
 
             /* RAW timestamp, 8-17 useful chars */
             j = snprintf((char *)(buff_up + buff_index), TX_BUFF_SIZE-buff_index, "\"tmst\":%u", p->count_us);
